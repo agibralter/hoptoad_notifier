@@ -9,7 +9,7 @@ module HoptoadNotifier
                     CGI::Session::CookieStore::TamperedWithCookie]
   
   class << self
-    attr_accessor :host, :port, :secure, :api_key, :filter_params, :ignore
+    attr_accessor :host, :port, :secure, :api_key, :filter_params, :ignore, :async_worker
     attr_reader   :backtrace_filters
 
     # Takes a block and adds it to the list of backtrace filters. When the filters
@@ -124,7 +124,11 @@ module HoptoadNotifier
       if public_environment?
         notice = normalize_notice(hash_or_exception)
         clean_notice(notice)
-        send_to_hoptoad(:notice => notice)
+        if async_worker?
+          async_worker.asynch_send_to_hoptoad(:notice => notice)
+        else
+          send_to_hoptoad(:notice => notice)
+        end
       end
     end
 
@@ -139,6 +143,14 @@ module HoptoadNotifier
     end
 
     private
+    
+    def async_worker?
+      !HoptoadNotifier.async_worker.nil?
+    end
+    
+    def async_worker
+      HoptoadNotifier.async_worker
+    end
     
     def public_environment? #nodoc:
       defined?(RAILS_ENV) and !['development', 'test'].include?(RAILS_ENV)
