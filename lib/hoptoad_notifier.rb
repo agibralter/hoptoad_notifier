@@ -3,13 +3,18 @@ require 'net/http'
 # Plugin for applications to automatically post errors to the Hoptoad of their choice.
 module HoptoadNotifier
 
-  IGNORE_DEFAULT = [ActiveRecord::RecordNotFound,
-                    ActionController::RoutingError,
-                    ActionController::InvalidAuthenticityToken,
-                    CGI::Session::CookieStore::TamperedWithCookie]
+  IGNORE_DEFAULT = ['ActiveRecord::RecordNotFound',
+                    'ActionController::RoutingError',
+                    'ActionController::InvalidAuthenticityToken',
+                    'CGI::Session::CookieStore::TamperedWithCookie']
+
+  # Some of these don't exist for Rails 1.2.*, so we have to consider that.
+  IGNORE_DEFAULT.map!{|e| eval(e) rescue nil }.compact!
+  IGNORE_DEFAULT.freeze
   
   class << self
-    attr_accessor :host, :port, :secure, :api_key, :filter_params, :ignore, :async_worker
+
+    attr_accessor :host, :port, :secure, :api_key, :filter_params, :async_worker
     attr_reader   :backtrace_filters
 
     # Takes a block and adds it to the list of backtrace filters. When the filters
@@ -47,6 +52,10 @@ module HoptoadNotifier
     # By default, all "password" attributes will have their contents replaced.
     def params_filters
       @params_filters ||= %w(password)
+    end
+
+    def environment_filters
+      @environment_filters ||= %w()
     end
     
     # Call this method to modify defaults in your initializers.
@@ -107,7 +116,8 @@ module HoptoadNotifier
 
     def self.included(base) #:nodoc:
       if base.instance_methods.include? 'rescue_action_in_public' and !base.instance_methods.include? 'rescue_action_in_public_without_hoptoad'
-        base.alias_method_chain :rescue_action_in_public, :hoptoad
+        base.send(:alias_method, :rescue_action_in_public_without_hoptoad, :rescue_action_in_public)
+        base.send(:alias_method, :rescue_action_in_public, :rescue_action_in_public_with_hoptoad)
       end
     end
     
@@ -123,7 +133,7 @@ module HoptoadNotifier
     def notify_hoptoad hash_or_exception
       if public_environment?
         notice = normalize_notice(hash_or_exception)
-        clean_notice(notice)
+        notice = clean_notice(notice)
         if async_worker?
           async_worker.asynch_send_to_hoptoad(:notice => notice)
         else
@@ -203,6 +213,10 @@ module HoptoadNotifier
       if notice[:request].is_a?(Hash) && notice[:request][:params].is_a?(Hash)
         notice[:request][:params] = clean_hoptoad_params(notice[:request][:params])
       end
+      if notice[:environment].is_a?(Hash)
+        notice[:environment] = clean_hoptoad_environment(notice[:environment])
+      end
+      clean_non_serializable_data(notice)
     end
 
     def send_to_hoptoad data #:nodoc:
@@ -250,6 +264,25 @@ module HoptoadNotifier
       end
     end
     
+    def clean_hoptoad_environment env #:nodoc:
+      env.each do |k, v|
+        env[k] = "<filtered>" if HoptoadNotifier.environment_filters.any? do |filter|
+          k.to_s.match(/#{filter}/)
+        end
+      end
+    end
+
+    def clean_non_serializable_data(notice) #:nodoc:
+      notice.select{|k,v| serialzable?(v) }.inject({}) do |h, pair|
+        h[pair.first] = pair.last.is_a?(Hash) ? clean_non_serializable_data(pair.last) : pair.last
+        h
+      end
+    end
+
+    def serialzable?(value) #:nodoc:
+      !(value.is_a?(Module) || value.kind_of?(IO))
+    end
+
     def stringify_keys(hash) #:nodoc:
       hash.inject({}) do |h, pair|
         h[pair.first.to_s] = pair.last.is_a?(Hash) ? stringify_keys(pair.last) : pair.last
